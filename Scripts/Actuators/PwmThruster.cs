@@ -29,7 +29,7 @@ namespace Labust.Actuators
         float sheetStep;
 
         Rigidbody _vehicleBody;
-        Transform _vehicle;
+        public Transform _vehicle;
         Transform vehicle
         {
             get

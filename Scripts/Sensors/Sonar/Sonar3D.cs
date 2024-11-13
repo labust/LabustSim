@@ -18,6 +18,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.IO;
 using Labust.Networking;
+using System.Threading;
 using Labust.Sensors;
 using Labust.Sensors.Core;
 using Labust.Visualization;
@@ -26,9 +27,7 @@ using Unity.Jobs;
 using UnityEngine;
 using UnityEngine.UI;
 using Sensorstreaming;
-using System.Threading;
 using Labust.Core;
-
 
 namespace Labust.Sensors
 {
@@ -102,6 +101,9 @@ namespace Labust.Sensors
         public enum RayDistribution { Equiangular, Equidistant }
         public RayDistribution sonarRayDistribution;
 
+        public enum SonarConfiguration { Custom, TritechGemini1200ik, ArisExplorer3000 }
+        public SonarConfiguration sonarConfig;
+
         /// <summary>
         /// Optional saving of generated polar and cartesian images. 
         /// If enabled, images saved in project_folder/SaveImages/
@@ -116,7 +118,14 @@ namespace Labust.Sensors
         /// <summary>
         /// Number of raycast rays simulating a single acoustic rays
         /// </summary>
-        int NumRaysPerAccusticRay = 1; 
+        /// 
+        public bool Grid = false;
+        public bool AddNoise = false;
+        public float NoiseLevel = 0.1f; // General noise intensity
+        public float SpeckleLevel = 0.05f; // Speckle noise intensity
+        public float RayleighScale = 1.0f; // Rayleigh noise scale
+        private System.Random systemRandom = new System.Random();
+        int NumRaysPerAccusticRay = 1;
 
         /// <summary>
         /// Pointcloud copy created on every update
@@ -145,7 +154,6 @@ namespace Labust.Sensors
         Coroutine _coroutine;
         Vector3 sonarPosition;
         NativeArray<Vector3> directionsLocal;
-
         void Start()
         {
             int totalRays = WidthRes * HeightRes * NumRaysPerAccusticRay;
@@ -157,6 +165,7 @@ namespace Labust.Sensors
             pointsCopy = new NativeArray<Vector3>(totalRays, Allocator.Persistent);
             sonarData = new NativeArray<SonarReading>(totalRays, Allocator.Persistent);
 
+            //sLoadSonarConfigs();
             InitializeRayArray();
 
             _raycastHelper = new RaycastJobHelper<SonarReading>(gameObject, directionsLocal, OnSonarHit, OnFinish, MaxDistance);
@@ -177,7 +186,7 @@ namespace Labust.Sensors
             points.CopyTo(pointsCopy);
             sonarReadings.CopyTo(sonarData);
 
-            //ComposePhotoImage(sonarReadings);
+            ComposePhotoImage(sonarReadings);
             ComposePolarImage(sonarReadings);
             ComposeCartesianImage(sonarReadings);
 
@@ -230,29 +239,59 @@ namespace Labust.Sensors
                 return;
             }
         }
+
+        /// <summary>
+        /// Method for setting custom sonar configurations selected from the dropdown sonar list
+        /// </summary>
+        /*         public void SetSonarConfig()
+                {
+
+                } */
+
+        /*         public void LoadSonarConfigs()
+                {
+                    var jsonText = File.ReadAllText("SonarPresets.json");
+                    SonarConfigs = JsonConvert.DeserializeObject<List<SonarConfigs>>(jsonText);
+                    sonarObj = target as RaycastSonar;
+                    sonarObj.Configs = SonarConfigs;
+                    _choices = new string[SonarConfigs.Count];
+                    var i = 0;
+                    foreach(var cfg in SonarConfigs)
+                    {
+                        _choices[i++] = cfg.Name;
+                    }
+                    _configName = _choices[sonarObj.ConfigIndex];
+                } */
         void OnDestroy()
         {
-            _raycastHelper.Dispose();
-            pointsCopy.Dispose();
-            sonarData.Dispose();
-            directionsLocal.Dispose();
 
+            if (pointsCopy.IsCreated) pointsCopy.Dispose();
+            if (sonarData.IsCreated) sonarData.Dispose();
+            if (directionsLocal.IsCreated) directionsLocal.Dispose();
+
+            _raycastHelper?.Dispose();
         }
 
         public SonarReading OnSonarHit(RaycastHit hit, Vector3 direction, int i)
         {
             var distance = hit.distance;
             var sonarReading = new SonarReading();
-            if (distance < MinDistance || hit.point.y > WATER_LEVEL || hit.point == Vector3.zero) // if above water, it is not hit!
+            float intensity = 0;
+
+            //in case of out of range rays add only thermal and speckle noise
+            if (distance < MinDistance || hit.point.y > WATER_LEVEL || hit.point == Vector3.zero )
             {
                 sonarReading.Valid = false;
+                sonarReading.Intensity = 0;
             }
             else
             {
                 sonarReading.Valid = true;
                 sonarReading.Distance = hit.distance;
 
-                sonarReading.Intensity = (RayIntensity/100) * (float)(Math.Acos(Math.Abs(Vector3.Dot(direction, hit.normal))));
+                intensity = (RayIntensity / 100) * (float)(Math.Acos(Math.Abs(Vector3.Dot(direction, hit.normal))));
+
+                sonarReading.Intensity = intensity;
             }
             return sonarReading;
         }
@@ -263,18 +302,18 @@ namespace Labust.Sensors
         /// </summary>
         private void ComposePhotoImage(NativeArray<SonarReading> reading)
         {
-            Color pixel;
+            UnityEngine.Color pixel;
             for (var x = 0; x < WidthRes; x++)
             {
                 for (var y = 0; y < HeightRes; y++)
                 {
                     if (reading[x * HeightRes + y].Valid)
                     {
-                        pixel = new Color(reading[x * HeightRes + y].Intensity, reading[x * HeightRes + y].Intensity, reading[x * HeightRes + y].Intensity, 1);
+                        pixel = new UnityEngine.Color(reading[x * HeightRes + y].Intensity, reading[x * HeightRes + y].Intensity, reading[x * HeightRes + y].Intensity, 1);
                     }
                     else
                     {
-                        pixel = new Color(0, 0, 0, 1);
+                        pixel = new UnityEngine.Color(0, 0, 0, 1);
                     }
                     sonarPhotoImage.SetPixel(x, y, pixel);
                 }
@@ -289,31 +328,53 @@ namespace Labust.Sensors
         /// </summary>
         private void ComposePolarImage(NativeArray<SonarReading> reading)
         {
-            Color pixel;
+            UnityEngine.Color pixel;
             int xCoordinate, yCoordinate;
+            float currentIntensity; 
             float[] yIntensity = new float[imageHeight];
             for (var x = 0; x < WidthRes; x++)
             {
                 //squashing all spatial columns into 2D and adding the intensities
                 for (var y = 0; y < HeightRes; y++)
                 {
+                    currentIntensity = reading[x * HeightRes + y].Intensity;
+                    //add sonar noise depending on the a target has been hit or not
+
+                    if(currentIntensity != 0 && AddNoise)
+                    {
+                        currentIntensity = AddGaussianNoise(currentIntensity);
+                        currentIntensity = AddSpeckleNoise(currentIntensity);
+                        currentIntensity = AddRayleighNoise(currentIntensity, reading[x * HeightRes + y].Distance);
+                    }
+                    else if (currentIntensity == 0 && AddNoise)
+                    {
+                        currentIntensity = AddGaussianNoise(currentIntensity);
+                        currentIntensity = AddSpeckleNoise(currentIntensity);
+                    }
+
                     yCoordinate = DistanceToImageY(reading[x * HeightRes + y].Distance);
-                    yIntensity[yCoordinate] += reading[x * HeightRes + y].Intensity;
+                    yIntensity[yCoordinate] += currentIntensity;
                 }
 
                 //stacking the intensities into corresponding 2D image columns
                 for (var y = 0; y < imageHeight; y++)
                 {
-                    pixel = new Color(yIntensity[y], yIntensity[y], yIntensity[y], 1);
+                    pixel = new UnityEngine.Color(yIntensity[y], yIntensity[y], yIntensity[y], 1);
                     sonarImage.SetPixel(x, y, pixel);
                 }
                 Array.Clear(yIntensity, 0, yIntensity.Length);
             }
 
+            if (Grid)
+            {
+                sonarImage = AddGridAndLabels(sonarImage);
+            }
+
             sonarImage.Apply();
             sonarDisplay.texture = sonarImage;
 
-            if (SaveImages){
+            if (SaveImages)
+            {
                 byte[] bytes = sonarImage.EncodeToPNG();
                 var dirPath = Application.dataPath + "/../SaveImages/";
                 if (!Directory.Exists(dirPath))
@@ -324,15 +385,16 @@ namespace Labust.Sensors
             }
 
         }
-        
+
         /// <summary>
         /// Creates a cartesian sonar image - 2D projection with bearing in cartesian coordinates on X axis and range on Y axis. 
         /// Beamformed based on the angle distribution, removes object distortion.
         /// Width and height can be set independently, .png image saving optional.
         /// </summary>
+
         private void ComposeCartesianImage(NativeArray<SonarReading> reading)
         {
-            Color pixel;
+            UnityEngine.Color pixel;
             int xCoordinate, yCoordinate;
 
             //populate left side of the swath
@@ -353,7 +415,7 @@ namespace Labust.Sensors
                     }
                     else
                     {
-                        pixel = new Color(1, 1, 1, 1);
+                        pixel = new UnityEngine.Color(0, 0, 0, 1);
                         sonarCartesianImage.SetPixel(CartesianXRes / 2 - x, y, pixel);
                     }
                 }
@@ -378,7 +440,7 @@ namespace Labust.Sensors
                     }
                     else
                     {
-                        pixel = new Color(1, 1, 1, 1);
+                        pixel = new UnityEngine.Color(0, 0, 0, 1);
                         sonarCartesianImage.SetPixel(x + CartesianXRes / 2, y, pixel);
                     }
                 }
@@ -399,6 +461,79 @@ namespace Labust.Sensors
                 imageCount += 1;
             }
         }
+
+        public Texture2D AddGridAndLabels(Texture2D image)
+        {
+            //add horizontal grid
+            int r = 0;
+            for (int i = 1; i < MaxDistance / 10; i++)
+            {
+                r = DistanceToImageY(i * 10);
+                image = DrawLine(image, 0, WidthRes, r, r);
+            }
+
+            r = DistanceToImageY(MaxDistance);
+            image = DrawLine(image, 0, WidthRes, r, r);
+
+            //add vertical grid
+            for (int i = 0; i < 5; i++)
+            {
+                image = DrawLine(image, i * WidthRes / 4, i * WidthRes / 4, 0, imageHeight);
+            }
+
+            return image;
+        }
+
+        public Texture2D DrawLine(Texture2D baseImage, int startX, int endX, int startY, int endY)
+        {
+            UnityEngine.Color color = new UnityEngine.Color(1, 1, 1, 1);
+
+            for (int x = startX; x <= endX; x++)
+            {
+                for (int y = startY; y <= endY; y++)
+                {
+                    baseImage.SetPixel(x, y, color);
+                }
+            }
+            return baseImage;
+        }
+
+        private float AddGaussianNoise(float intensity)
+        {
+            float noise = RandomGaussian() * NoiseLevel;
+            return Mathf.Clamp(intensity + noise, 0.0f, 1.0f);
+        }
+
+        private float RandomGaussian()
+        {
+            float u1 = 1.0f - (float)systemRandom.NextDouble();
+            float u2 = 1.0f - (float)systemRandom.NextDouble();
+            return Mathf.Sqrt(-2.0f * Mathf.Log(u1)) * Mathf.Sin(2.0f * Mathf.PI * u2);
+        }
+
+        private float AddSpeckleNoise(float intensity)
+        {
+            float speckle = (1 + RandomGaussian() * SpeckleLevel);
+            return Mathf.Clamp(intensity * speckle, 0.0f, 1.0f);
+        }
+
+        private float AddRayleighNoise(float intensity, float distance)
+        {
+            float rayleighNoise = DistanceRayleigh(RayleighScale, distance);
+            return Mathf.Clamp(intensity + rayleighNoise, 0.0f, 1.0f);
+        }
+
+        private float DistanceRayleigh(float sigma, float r)
+        {
+            float p_r = (r / sigma * sigma) * Mathf.Exp(-((r * r) / (2 * sigma * sigma)));
+            return p_r;
+        }
+        private float RandomRayleigh(float scale)
+        {
+            float u = (float)systemRandom.NextDouble();
+            return scale * Mathf.Sqrt(-2.0f * Mathf.Log(u));
+        }
+
 
     }
 

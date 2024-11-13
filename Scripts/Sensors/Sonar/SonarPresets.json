@@ -1,0 +1,28 @@
+[
+  {
+    "Name": "TritechGemini1200ik",
+    "Frequency": 5,
+    "WidthRes": 1024,
+    "HeightRes": 512,
+    "MaxRange": 120.0,
+    "MinRange": 0.1,
+    "HorizontalFieldOfView": 120.0,
+    "VerticalFieldOfView": 12.0,
+    "ImageHeight": 1024,
+    "CartesianXResolution": 1024,
+    "CartesianYResolution": 1024
+  },
+  {
+    "Name": "ArisExplorer3000",
+    "Frequency": 5,
+    "WidthRes": 128,
+    "HeightRes": 128,
+    "MaxRange": 15.0,
+    "MinRange": 0.7,
+    "HorizontalFieldOfView": 30.0,
+    "VerticalFieldOfView": 15.0,
+    "ImageHeight": 128,
+    "CartesianXResolution": 128,
+    "CartesianYResolution": 128
+  }
+]
